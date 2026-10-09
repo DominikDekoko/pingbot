@@ -20,9 +20,11 @@ PAGE_SIZE = 8
 class PrivateMenu:
     async def home(self, event):
         self.storage.cancel(event.sender_id)
+        buttons = HOME + ([[Button.text("Стикер-ответы", resize=True, persistent=True)]]
+                          if self.is_admin(event.sender_id) else [])
         await self.reply(event, "Выберите раздел. Любая ваша фраза работает с любым вашим списком.\n"
                          "В чате напишите: фраза + название списка.\n"
-                         "Например: я иду домой дота 2.\n@all — упомянуть участников чата.", HOME)
+                         "Например: я иду домой дота 2.\n@all — упомянуть участников чата.", buttons)
 
     async def catalog(self, event, kind, page=0):
         self.storage.cancel(event.sender_id)
@@ -78,6 +80,9 @@ class PrivateMenu:
         if data == "home":
             await self.home(event)
             return
+        if data.startswith('sticker:'):
+            await self.sticker_callback(event, data)
+            return
         match = re.fullmatch(r"(list|phrase):(page|add|view|edit|rename|askdelete|delete)(?::([a-f0-9]{32}|[0-9]{1,9}))?", data)
         if not match:
             await self.reply(event, "Кнопка устарела. Откройте главное меню.", CANCEL)
@@ -120,6 +125,9 @@ class PrivateMenu:
         owner = event.sender_id
         text = event.raw_text.strip()
         self.storage.register(owner)
+        if text == "Стикер-ответы":
+            await self.sticker_catalog(event)
+            return
         if text in {"Мои фразы", "Мои списки"}:
             await self.catalog(event, "phrase" if text == "Мои фразы" else "list")
             return
@@ -132,6 +140,9 @@ class PrivateMenu:
             await self.home(event)
             return
         draft = self.storage.draft(owner)
+        if draft and draft['stage'].startswith('admin_'):
+            await self.sticker_input(event, draft)
+            return
         if not draft:
             await self.home(event)
             return

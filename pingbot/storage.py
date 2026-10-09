@@ -39,6 +39,45 @@ class Storage:
                     self.db.execute("INSERT INTO phrases VALUES (?, ?, ?, ?)",
                                     (uuid4().hex, row['id'], row['phrase'], normalize(row['phrase'])))
                 self.db.execute("PRAGMA user_version=1")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+                self.db.execute("""CREATE TABLE sticker_rules (
+                    id TEXT PRIMARY KEY, target_id INTEGER NOT NULL UNIQUE,
+                    username TEXT NOT NULL, chance REAL NOT NULL CHECK(chance >= 0 AND chance <= 100),
+                    document BLOB NOT NULL, content BLOB NOT NULL
+                )""")
+                self.db.execute("PRAGMA user_version=2")
+
+    def sticker_rules(self):
+        return self.db.execute("SELECT id, target_id, username, chance FROM sticker_rules ORDER BY username").fetchall()
+
+    def sticker_rule(self, item_id):
+        return self.db.execute("SELECT * FROM sticker_rules WHERE id=?", (item_id,)).fetchone()
+
+    def sticker_for_user(self, target_id):
+        return self.db.execute("SELECT * FROM sticker_rules WHERE target_id=?", (target_id,)).fetchone()
+
+    def save_sticker_rule(self, owner, target_id, username, chance, document, content):
+        item_id = uuid4().hex
+        with self.db:
+            self.db.execute("INSERT INTO sticker_rules VALUES (?, ?, ?, ?, ?, ?)",
+                            (item_id, target_id, username, chance, document, content))
+            self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
+        return item_id
+
+    def update_sticker_rule(self, owner, item_id, *, chance=None, document=None, content=None):
+        with self.db:
+            if chance is not None:
+                changed = self.db.execute("UPDATE sticker_rules SET chance=? WHERE id=?", (chance, item_id)).rowcount
+            else:
+                changed = self.db.execute("UPDATE sticker_rules SET document=?, content=? WHERE id=?",
+                                         (document, content, item_id)).rowcount
+            if not changed:
+                raise ValueError("Правило уже удалено. Откройте меню заново.")
+            self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
+
+    def delete_sticker_rule(self, item_id):
+        with self.db:
+            self.db.execute("DELETE FROM sticker_rules WHERE id=?", (item_id,))
 
     def register(self, owner):
         with self.db:

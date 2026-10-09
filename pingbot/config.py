@@ -12,6 +12,15 @@ def boolean(value: str) -> bool:
     return value.strip().lower() == "true"
 
 
+def parse_admin_ids(value: str) -> frozenset[int]:
+    if not value.strip():
+        return frozenset()
+    parts = [part.strip() for part in value.split(',')]
+    if any(not re.fullmatch(r"[0-9]+", part) or not 0 < int(part) < 2**63 for part in parts):
+        raise ValueError("ADMIN_IDS: положительные Telegram ID через запятую")
+    return frozenset(map(int, parts))
+
+
 @dataclass(frozen=True)
 class Config:
     api_id: int
@@ -23,6 +32,7 @@ class Config:
     all_allow_everyone: bool = True
     cooldown_seconds: int = 30
     data_dir: Path = Path("data")
+    admin_ids: frozenset[int] = frozenset()
 
     @classmethod
     def from_env(cls):
@@ -48,4 +58,5 @@ class Config:
         return cls(api_id, api_hash, token,
                    os.getenv("TG_WS_PROXY_HOST", "tg-ws-proxy"), port, secret,
                    boolean(os.getenv("ALL_ALLOW_EVERYONE", "True")), cooldown,
-                   Path(os.getenv("DATA_DIR", "data")))
+                   Path(os.getenv("DATA_DIR", "data")),
+                   parse_admin_ids(os.getenv("ADMIN_IDS", "")))

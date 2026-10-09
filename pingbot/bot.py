@@ -10,11 +10,12 @@ from telethon.tl.types import User
 from .mentions import ALL_PATTERN, user_batches, username_batches
 from .menus import PrivateMenu
 from .storage import normalize
+from .stickers import StickerAdmin
 
 LOG = logging.getLogger(__name__)
 
 
-class Bot(PrivateMenu):
+class Bot(StickerAdmin, PrivateMenu):
     def __init__(self, client, storage, config, username):
         self.client, self.storage, self.config = client, storage, config
         self.username = username.lower()
@@ -34,7 +35,7 @@ class Bot(PrivateMenu):
 
     async def handle(self, event):
         callback = isinstance(getattr(event, "data", None), bytes)
-        if (not callback and not event.raw_text) or not event.sender_id or event.sender_id <= 0:
+        if not event.sender_id or event.sender_id <= 0:
             return
         if time.monotonic() < self.blocked_until:
             return
@@ -54,7 +55,11 @@ class Bot(PrivateMenu):
                     else:
                         await self.private(event)
             elif event.is_group:
-                await self.group(event)
+                if getattr(getattr(event, 'message', None), 'action', None):
+                    return
+                await self.auto_sticker(event)
+                if event.raw_text and time.monotonic() >= self.blocked_until:
+                    await self.group(event)
         except errors.FloodWaitError as exc:
             # Do not retry sends: earlier batches may already have been delivered.
             self.blocked_until = time.monotonic() + exc.seconds

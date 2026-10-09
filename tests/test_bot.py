@@ -50,6 +50,7 @@ class StorageTests(unittest.TestCase):
                         name_key TEXT NOT NULL, members TEXT NOT NULL, PRIMARY KEY(owner, name_key));
                     INSERT INTO lists VALUES (1, 'дота 2', 'дота 2', '["@alice"]');
                 """)
+            old.close()
             db = Storage(path)
             self.assertEqual(db.phrases(1)[0]['text'], 'иду на работу')
             original_id = db.get(1, 'дота 2')['id']
@@ -96,7 +97,7 @@ class StorageTests(unittest.TestCase):
 class BotTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.db = Storage(":memory:")
-        self.config = SimpleNamespace(all_allow_everyone=True, cooldown_seconds=0)
+        self.config = SimpleNamespace(all_allow_everyone=True, cooldown_seconds=0, admin_ids=frozenset())
         self.client = SimpleNamespace(get_permissions=AsyncMock(), get_participants=AsyncMock(), send_message=AsyncMock())
         self.bot = Bot(self.client, self.db, self.config, "pingbot")
 
