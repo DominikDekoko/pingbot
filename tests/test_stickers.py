@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telethon import TelegramClient, errors
-from telethon.tl.types import Document, DocumentAttributeSticker, InputStickerSetEmpty, User
+from telethon.tl.types import Document, DocumentAttributeSticker, InputStickerSetEmpty, InputStickerSetID, InputMediaDocument, User
 
 from pingbot.bot import Bot
 from pingbot.config import parse_admin_ids
@@ -123,10 +123,12 @@ class StickerTests(unittest.IsolatedAsyncioTestCase):
             await self.bot.handle(self.event(owner=10, private=False))
         call = self.client.send_file.call_args
         self.assertEqual(call.args[0], -100)
-        self.assertEqual(call.args[1].getvalue(), b'data')
+        self.assertIsInstance(call.args[1], Document)
+        self.assertEqual(call.args[1].id, 42)
         self.assertEqual(call.kwargs['reply_to'], 50)
-        self.assertEqual(call.kwargs['mime_type'], 'image/webp')
-        self.assertIsInstance(call.kwargs['attributes'][0], DocumentAttributeSticker)
+        self.assertEqual(call.args[1].mime_type, 'image/webp')
+        self.assertIsInstance(call.args[1].attributes[0], DocumentAttributeSticker)
+        self.assertNotIn('force_document', call.kwargs)
         self.client.send_file.reset_mock()
         with patch('pingbot.stickers.random.random', return_value=0.25):
             await self.bot.handle(self.event('test', owner=10, private=False))
@@ -154,13 +156,50 @@ class StickerTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.handle(event)
         self.assertEqual(event.reply.call_args.args[0], '@alice')
 
-    async def test_edit_sticker_and_expired_reference_independent_upload(self):
+    async def test_edit_sticker_preserves_original_document(self):
         rule = self.create_rule()
         await self.click(f'sticker:edit:{rule}')
         await self.bot.handle(self.event(document=sticker('video/webm')))
         await self.click(f'sticker:preview:{rule}')
-        self.assertEqual(self.client.send_file.call_args.kwargs['mime_type'], 'video/webm')
-        self.assertEqual(self.client.send_file.call_args.args[1].name, 'sticker.webm')
+        self.assertEqual(self.client.send_file.call_args.args[1].mime_type, 'video/webm')
+        self.assertEqual(self.client.send_file.call_args.args[1].id, 42)
+
+    async def test_telethon_reuses_document_without_upload_for_all_sticker_types(self):
+        client = TelegramClient(None, 123, '0' * 32)
+        client.upload_file = AsyncMock(side_effect=AssertionError('Must not upload sticker bytes'))
+        try:
+            for mime in ('image/webp', 'application/x-tgsticker', 'video/webm'):
+                original = sticker(mime)
+                _, media, _ = await client._file_to_media(original)
+                self.assertIsInstance(media, InputMediaDocument)
+                self.assertEqual(media.id.id, original.id)
+                self.assertEqual(media.id.file_reference, original.file_reference)
+            client.upload_file.assert_not_awaited()
+        finally:
+            await client.disconnect()
+
+    async def test_expired_reference_refreshes_from_pack_and_retries(self):
+        original = sticker()
+        original.attributes[0].stickerset = InputStickerSetID(id=7, access_hash=8)
+        rule = self.db.save_sticker_rule(1, 10, 'target', 100, bytes(original), b'data')
+        refreshed = sticker()
+        refreshed.file_reference = b'fresh-reference'
+        client = AsyncMock(return_value=SimpleNamespace(documents=[refreshed]))
+        client.send_file.side_effect = [errors.FileReferenceExpiredError(request=None), None]
+        self.bot.client = client
+        await self.bot.send_saved_sticker(-100, self.db.sticker_rule(rule), reply_to=50)
+        self.assertEqual(client.send_file.await_count, 2)
+        self.assertEqual(client.call_args.args[0].stickerset.id, 7)
+        self.assertEqual(client.send_file.call_args.args[1].file_reference, b'fresh-reference')
+        self.assertEqual(client.send_file.call_args.kwargs['reply_to'], 50)
+        self.assertEqual(self.db.sticker_rule(rule)['document'], bytes(refreshed))
+
+    async def test_expired_packless_sticker_never_falls_back_to_picture(self):
+        rule = self.create_rule()
+        self.client.send_file.side_effect = errors.FileReferenceExpiredError(request=None)
+        with self.assertRaisesRegex(ValueError, 'Изменить стикер'):
+            await self.bot.send_saved_sticker(-100, self.db.sticker_rule(rule))
+        self.client.send_file.assert_awaited_once()
 
     async def test_cancel_keeps_existing_rule(self):
         rule = self.create_rule()

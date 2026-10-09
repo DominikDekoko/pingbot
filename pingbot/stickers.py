@@ -1,5 +1,4 @@
 import base64
-import io
 import json
 import logging
 import math
@@ -8,9 +7,9 @@ import re
 import sqlite3
 import time
 
-from telethon import errors
+from telethon import errors, functions
 from telethon.extensions import BinaryReader
-from telethon.tl.types import User
+from telethon.tl.types import User, DocumentAttributeSticker, InputStickerSetEmpty
 
 from .menus import CANCEL, PAGE_SIZE, button
 
@@ -99,7 +98,10 @@ class StickerAdmin:
         if action == 'view':
             await self.sticker_detail(event, item_id)
         elif action == 'preview':
-            await self.send_saved_sticker(await event.get_input_chat(), row)
+            try:
+                await self.send_saved_sticker(await event.get_input_chat(), row)
+            except ValueError as exc:
+                await self.reply(event, str(exc), CANCEL)
         elif action in {'edit', 'chance'}:
             self.storage.set_draft(event.sender_id, 'admin_' + action, json.dumps({'id': item_id}))
             await self.reply(event, "Отправьте новый стикер." if action == 'edit'
@@ -170,14 +172,22 @@ class StickerAdmin:
             await self.reply(event, str(exc), CANCEL)
 
     async def send_saved_sticker(self, chat, row, reply_to=None):
-        # Re-upload saved bytes: Telegram file_reference can expire after a restart.
+        # Reuse Telegram's original document, preserving sticker identity and pack.
+        # Uploading the bytes again can make Telegram classify it as a plain file.
         with BinaryReader(row['document']) as reader:
             document = reader.tgread_object()
-        file = io.BytesIO(row['content'])
-        suffix = {'image/webp': 'webp', 'application/x-tgsticker': 'tgs', 'video/webm': 'webm'}.get(document.mime_type, 'webp')
-        file.name = 'sticker.' + suffix
-        await self.client.send_file(chat, file, mime_type=document.mime_type,
-                                    attributes=document.attributes, force_document=True, reply_to=reply_to)
+        try:
+            await self.client.send_file(chat, document, reply_to=reply_to)
+        except (errors.FileReferenceExpiredError, errors.FileReferenceInvalidError):
+            attribute = next((a for a in document.attributes if isinstance(a, DocumentAttributeSticker)), None)
+            if attribute is None or isinstance(attribute.stickerset, InputStickerSetEmpty):
+                raise ValueError("Ссылка на стикер истекла. Отправьте его заново через «Изменить стикер».") from None
+            pack = await self.client(functions.messages.GetStickerSetRequest(attribute.stickerset, hash=0))
+            refreshed = next((d for d in pack.documents if d.id == document.id), None)
+            if refreshed is None:
+                raise ValueError("Стикер больше не найден в наборе. Выберите новый стикер.")
+            self.storage.refresh_sticker_document(row['id'], row['document'], bytes(refreshed))
+            await self.client.send_file(chat, refreshed, reply_to=reply_to)
 
     async def auto_sticker(self, event):
         row = self.storage.sticker_for_user(event.sender_id)

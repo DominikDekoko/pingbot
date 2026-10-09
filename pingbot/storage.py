@@ -79,6 +79,12 @@ class Storage:
         with self.db:
             self.db.execute("DELETE FROM sticker_rules WHERE id=?", (item_id,))
 
+    def refresh_sticker_document(self, item_id, previous, refreshed):
+        with self.db:
+            # Do not overwrite a sticker replaced by an administrator meanwhile.
+            self.db.execute("UPDATE sticker_rules SET document=? WHERE id=? AND document=?",
+                            (refreshed, item_id, previous))
+
     def register(self, owner):
         with self.db:
             created = self.db.execute("INSERT OR IGNORE INTO users(id) VALUES (?)", (owner,)).rowcount
