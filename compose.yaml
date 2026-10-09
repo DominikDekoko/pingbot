@@ -1,0 +1,37 @@
+services:
+  tg-ws-proxy:
+    build:
+      context: https://github.com/Flowseal/tg-ws-proxy.git#a232472cbe2baf0a328af06a9c23904ed961e68d
+    restart: unless-stopped
+    environment:
+      TG_WS_PROXY_HOST: 0.0.0.0
+      TG_WS_PROXY_PORT: ${TG_WS_PROXY_PORT:-1443}
+      TG_WS_PROXY_SECRET: ${TG_WS_PROXY_SECRET:?Fill TG_WS_PROXY_SECRET in .env}
+      TG_WS_PROXY_DC_IPS: ${TG_WS_PROXY_DC_IPS:-2:149.154.167.220 4:149.154.167.220}
+    healthcheck:
+      test: [CMD, python, -c, "import os,socket; socket.create_connection(('127.0.0.1',int(os.environ['TG_WS_PROXY_PORT'])),2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [telegram]
+  bot:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      TG_WS_PROXY_HOST: tg-ws-proxy
+    depends_on:
+      tg-ws-proxy:
+        condition: service_healthy
+    volumes:
+      - bot-data:/app/data
+    networks: [telegram]
+    stop_grace_period: 30s
+
+networks:
+  telegram:
+volumes:
+  bot-data:
