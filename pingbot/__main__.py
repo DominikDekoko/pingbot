@@ -27,6 +27,7 @@ async def main():
             raise ValueError("Сессия принадлежит другому аккаунту. Используйте отдельный DATA_DIR для этого бота.")
         bot = Bot(client, storage, config, me.username)
         client.add_event_handler(bot.handle, events.NewMessage(incoming=True))
+        client.add_event_handler(bot.handle, events.CallbackQuery())
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(client.disconnect()))

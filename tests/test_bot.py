@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,16 +27,38 @@ class StorageTests(unittest.TestCase):
             db.register(2)
             db.save(1, "Дота 2", ["@alice"])
             db.save(2, "дота 2", ["@bobby"])
-            db.set_phrase(1, "играем")
+            db.save_phrase(1, "играем", db.phrases(1)[0]['id'])
             db.set_draft(1, "members", "новый")
             db.close()
             db = Storage(path)
-            self.assertEqual(db.phrase(1), "играем")
-            self.assertEqual(db.phrase(2), "я иду домой")
+            self.assertEqual(db.phrases(1)[0]['text'], "играем")
+            self.assertEqual(db.phrases(2)[0]['text'], "я иду домой")
             self.assertEqual(db.draft(1)["name"], "новый")
             self.assertEqual(json.loads(db.get(1, " Дота   2 ")["members"]), ["@alice"])
             db.delete(1, "дота 2")
             self.assertIsNotNone(db.get(2, "дота 2"))
+            db.close()
+
+    def test_migrate_legacy_database_only_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'old.db'
+            with sqlite3.connect(path) as old:
+                old.executescript("""
+                    CREATE TABLE users (id INTEGER PRIMARY KEY, phrase TEXT NOT NULL);
+                    INSERT INTO users VALUES (1, 'иду на работу');
+                    CREATE TABLE lists (owner INTEGER NOT NULL, name TEXT NOT NULL,
+                        name_key TEXT NOT NULL, members TEXT NOT NULL, PRIMARY KEY(owner, name_key));
+                    INSERT INTO lists VALUES (1, 'дота 2', 'дота 2', '["@alice"]');
+                """)
+            db = Storage(path)
+            self.assertEqual(db.phrases(1)[0]['text'], 'иду на работу')
+            original_id = db.get(1, 'дота 2')['id']
+            db.delete_item(1, 'phrase', db.phrases(1)[0]['id'])
+            db.close()
+            db = Storage(path)
+            db.register(1)
+            self.assertEqual(db.phrases(1), [])
+            self.assertEqual(db.get(1, 'дота 2')['id'], original_id)
             db.close()
 
     def test_validation(self):
@@ -87,15 +110,111 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                                get_input_chat=AsyncMock(return_value=-123))
 
     async def test_private_wizard_invalid_input_edit_and_cancel(self):
-        for text in ("/start", "дота 2", "@alice @bobby @ALICE"):
+        await self.bot.handle(self.event('/start', private=True))
+        await self.click('list:add')
+        for text in ("дота 2", "@alice @bobby @ALICE"):
             await self.bot.handle(self.event(text, private=True))
         self.assertEqual(json.loads(self.db.get(1, "дота 2")["members"]), ["@alice", "@bobby"])
-        await self.bot.handle(self.event("/edit дота 2", private=True))
+        await self.click(f"list:edit:{self.db.get(1, 'дота 2')['id']}")
         await self.bot.handle(self.event("bad input", private=True))
         self.assertIsNotNone(self.db.draft(1))
-        await self.bot.handle(self.event("/cancel", private=True))
+        await self.click('home')
         self.assertIsNone(self.db.draft(1))
         self.assertEqual(len(json.loads(self.db.get(1, "дота 2")["members"])), 2)
+
+    async def click(self, data, owner=1, private=True):
+        event = self.event('', owner, private)
+        event.data = data.encode()
+        event.answer = AsyncMock()
+        await self.bot.handle(event)
+        event.answer.assert_awaited_once()
+        return event
+
+    async def test_all_phrase_list_combinations(self):
+        self.db.register(1)
+        self.db.save_phrase(1, 'я иду на работу')
+        self.db.save(1, 'дота 2', ['@alice'])
+        self.db.save(1, 'сотрудники', ['@bobby'])
+        for phrase in ('я иду домой', 'я иду на работу'):
+            for name, member in (('дота 2', '@alice'), ('сотрудники', '@bobby')):
+                event = self.event(f'{phrase} {name}')
+                await self.bot.handle(event)
+                self.assertEqual(event.reply.call_args.args[0], member)
+
+    async def test_phrase_buttons_add_edit_duplicate_delete(self):
+        await self.click('phrase:add')
+        await self.bot.handle(self.event('Я иду на работу', private=True))
+        phrase = next(r for r in self.db.phrases(1) if r['text'] == 'Я иду на работу')
+        await self.click(f"phrase:edit:{phrase['id']}")
+        await self.bot.handle(self.event('Я ИДУ   ДОМОЙ', private=True))
+        self.assertEqual(self.db.item(1, 'phrase', phrase['id'])['text'], 'Я иду на работу')
+        self.assertIsNotNone(self.db.draft(1))
+        await self.bot.handle(self.event('играем', private=True))
+        self.assertEqual(self.db.item(1, 'phrase', phrase['id'])['text'], 'играем')
+        await self.click(f"phrase:askdelete:{phrase['id']}")
+        self.assertIsNotNone(self.db.item(1, 'phrase', phrase['id']))
+        await self.click(f"phrase:view:{phrase['id']}")
+        self.assertIsNotNone(self.db.item(1, 'phrase', phrase['id']))
+        await self.click(f"phrase:delete:{phrase['id']}")
+        self.assertIsNone(self.db.item(1, 'phrase', phrase['id']))
+
+    async def test_list_rename_edit_delete_and_stale_buttons(self):
+        self.db.register(1)
+        self.db.save(1, 'дота 2', ['@alice'])
+        item_id = self.db.get(1, 'дота 2')['id']
+        await self.click(f'list:rename:{item_id}')
+        await self.bot.handle(self.event('сотрудники', private=True))
+        self.assertIsNone(self.db.get(1, 'дота 2'))
+        self.assertEqual(self.db.get(1, 'сотрудники')['id'], item_id)
+        await self.click(f'list:edit:{item_id}')
+        await self.bot.handle(self.event('@bobby', private=True))
+        self.assertEqual(json.loads(self.db.get(1, 'сотрудники')['members']), ['@bobby'])
+        await self.click(f'list:delete:{item_id}')
+        self.db.save(1, 'сотрудники', ['@alice'])
+        await self.click(f'list:delete:{item_id}')
+        self.assertIsNotNone(self.db.get(1, 'сотрудники'))
+
+    async def test_foreign_and_group_callbacks_cannot_modify_data(self):
+        self.db.register(1)
+        self.db.save(1, 'дота 2', ['@alice'])
+        for kind, item_id in [('list', self.db.get(1, 'дота 2')['id']),
+                              ('phrase', self.db.phrases(1)[0]['id'])]:
+            for action in ('view', 'edit', 'rename', 'delete'):
+                await self.click(f'{kind}:{action}:{item_id}', owner=2)
+                self.assertIsNone(self.db.draft(2))
+                self.assertIsNotNone(self.db.item(1, kind, item_id))
+            await self.click(f'{kind}:delete:{item_id}', private=False)
+            self.assertIsNotNone(self.db.item(1, kind, item_id))
+
+    async def test_navigation_pagination_and_callback_size(self):
+        self.db.register(1)
+        for i in range(12):
+            self.db.save_phrase(1, 'ф' * 95 + str(i))
+        event = await self.click('phrase:page:1')
+        buttons = event.reply.call_args.kwargs['buttons']
+        self.assertIn('2/2', event.reply.call_args.args[0])
+        # Serialize the actual Telethon markup, not a stand-in keyboard type.
+        from telethon import TelegramClient
+        markup = TelegramClient.build_reply_markup(buttons)
+        self.assertTrue(bytes(markup))
+        for row in markup.rows:
+            for b in row.buttons:
+                self.assertLessEqual(len(b.type.data), 64)
+        await self.click('phrase:add')
+        await self.bot.handle(self.event('Мои списки', private=True))
+        self.assertIsNone(self.db.draft(1))
+
+    async def test_overlapping_phrases_fallback_and_longest_match(self):
+        self.db.register(1)
+        self.db.save_phrase(1, 'я иду домой дота')
+        self.db.save(1, 'дота 2', ['@alice'])
+        event = self.event('я иду домой дота 2')
+        await self.bot.handle(event)
+        self.assertEqual(event.reply.call_args.args[0], '@alice')
+        self.db.save(1, '2', ['@bobby'])
+        event = self.event('я иду домой дота 2')
+        await self.bot.handle(event)
+        self.assertEqual(event.reply.call_args.args[0], '@bobby')
 
     async def test_own_lists_only_and_full_phrase_match(self):
         for owner, member in ((1, "@alice"), (2, "@bobby")):

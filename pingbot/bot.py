@@ -7,27 +7,14 @@ from weakref import WeakValueDictionary
 from telethon import errors
 from telethon.tl.types import User
 
-from .mentions import ALL_PATTERN, parse_members, user_batches, username_batches
+from .mentions import ALL_PATTERN, user_batches, username_batches
+from .menus import PrivateMenu
 from .storage import normalize
 
 LOG = logging.getLogger(__name__)
-HELP = """Личные списки участников:
-/new — создать список
-/lists — мои списки и фраза
-/show название — показать список
-/edit название — заменить участников
-/delete название — удалить список
-/phrase новая фраза — изменить мою кодовую фразу
-/cancel — отменить ввод
-
-В чате: я иду домой дота 2
-Используется только ваш список. Фраза по умолчанию: я иду домой.
-@all — упомянуть участников текущего чата.
-Бот должен видеть сообщения: назначьте его администратором.
-"""
 
 
-class Bot:
+class Bot(PrivateMenu):
     def __init__(self, client, storage, config, username):
         self.client, self.storage, self.config = client, storage, config
         self.username = username.lower()
@@ -42,21 +29,30 @@ class Bot:
             self.locks[key] = lock
         return lock
 
-    async def reply(self, event, text):
-        return await event.reply(text, parse_mode=None, link_preview=False)
+    async def reply(self, event, text, buttons=None):
+        return await event.reply(text, parse_mode=None, link_preview=False, buttons=buttons)
 
     async def handle(self, event):
-        if not event.raw_text or not event.sender_id or event.sender_id <= 0:
+        callback = isinstance(getattr(event, "data", None), bytes)
+        if (not callback and not event.raw_text) or not event.sender_id or event.sender_id <= 0:
             return
         if time.monotonic() < self.blocked_until:
             return
         try:
+            if callback:
+                if not event.is_private or event.chat_id != event.sender_id:
+                    await event.answer("Откройте меню в личке с ботом.", alert=True)
+                    return
+                await event.answer()
             sender = await event.get_sender()
             if not isinstance(sender, User) or sender.bot:
                 return
             if event.is_private:
                 async with self.lock(("user", event.sender_id)):
-                    await self.private(event)
+                    if callback:
+                        await self.callback(event)
+                    else:
+                        await self.private(event)
             elif event.is_group:
                 await self.group(event)
         except errors.FloodWaitError as exc:
@@ -82,92 +78,23 @@ class Bot:
         except errors.RPCError:
             LOG.warning("Could not send error reply in chat %s", event.chat_id)
 
-    async def private(self, event):
-        owner = event.sender_id
-        text = event.raw_text.strip()
-        self.storage.register(owner)
-        if text.startswith("/"):
-            command, _, arg = text.partition(" ")
-            command, _, target = command.partition("@")
-            if target and target.lower() != self.username:
-                return
-            arg = " ".join(arg.split())
-            command = command.lower()
-            if command in {"/start", "/new"}:
-                self.storage.set_draft(owner, "name")
-                await self.reply(event, "Введите название личного списка, например: дота 2.\n/cancel — отмена, /help — помощь.")
-            elif command == "/help":
-                await self.reply(event, HELP)
-            elif command == "/cancel":
-                self.storage.cancel(owner)
-                await self.reply(event, "Ввод отменён.")
-            elif command == "/phrase":
-                if not arg or len(arg) > 100 or ALL_PATTERN.search(arg):
-                    await self.reply(event, "Формат: /phrase я иду домой\nДо 100 символов, без @all.")
-                    return
-                self.storage.set_phrase(owner, arg)
-                await self.reply(event, f"Ваша фраза: {arg}\nВ чате напишите её и название своего списка.")
-            elif command == "/lists":
-                rows = self.storage.lists(owner)
-                await self.reply(event, f"Ваша фраза: {self.storage.phrase(owner)}\n" +
-                                 ("Ваши списки:" if rows else "Списков нет. Создать: /new"))
-                for i in range(0, len(rows), 25):
-                    await self.reply(event, "\n".join(f"• {r['name']} ({len(json.loads(r['members']))})" for r in rows[i:i + 25]))
-            elif command in {"/show", "/edit", "/delete"}:
-                row = self.storage.get(owner, arg)
-                if not row:
-                    await self.reply(event, "Ваш список не найден. Укажите название после команды. /lists — ваши списки.")
-                elif command == "/show":
-                    await self.reply(event, row["name"])
-                    for batch in username_batches(json.loads(row["members"])):
-                        await self.reply(event, batch)
-                elif command == "/edit":
-                    self.storage.set_draft(owner, "members", row["name"])
-                    await self.reply(event, "Отправьте новый список @username через пробел. Старый сохранится до завершения ввода.")
-                else:
-                    self.storage.delete(owner, arg)
-                    self.storage.cancel(owner)
-                    await self.reply(event, "Список удалён.")
-            else:
-                await self.reply(event, "Неизвестная команда. /help — помощь.")
-            return
-        draft = self.storage.draft(owner)
-        if not draft:
-            await self.reply(event, "Создать список: /new. Изменить фразу: /phrase ваша фраза. /help — помощь.")
-        elif draft["stage"] == "name":
-            name = " ".join(text.split())
-            if not name or len(name) > 80 or ALL_PATTERN.search(name):
-                await self.reply(event, "Название должно содержать от 1 до 80 символов, без @all.")
-            elif self.storage.get(owner, name):
-                await self.reply(event, "У вас уже есть такой список. Выберите другое название или /edit название.")
-            else:
-                self.storage.set_draft(owner, "members", name)
-                await self.reply(event, "Отправьте одним сообщением @username участников через пробел (до 200).")
-        else:
-            try:
-                members = parse_members(text)
-            except ValueError as exc:
-                await self.reply(event, str(exc))
-                return
-            self.storage.save(owner, draft["name"], members)
-            await self.reply(event, f"Сохранено участников: {len(members)}.\nВ чате напишите: {self.storage.phrase(owner)} {draft['name']}\nИзменить кодовую фразу: /phrase ваша фраза")
-
     async def group(self, event):
         text = event.raw_text.strip()
         all_requested = bool(ALL_PATTERN.search(text))
         members = None
         if not all_requested:
-            phrase = self.storage.phrase(event.sender_id)
-            if not phrase:
-                return
-            prefix = normalize(phrase) + " "
             normalized = normalize(text)
-            if not normalized.startswith(prefix):
+            # Longest matching phrase wins if two phrase/list combinations collide.
+            for phrase in sorted(self.storage.phrases(event.sender_id),
+                                 key=lambda p: len(p["text_key"]), reverse=True):
+                prefix = phrase["text_key"] + " "
+                if normalized.startswith(prefix):
+                    row = self.storage.get(event.sender_id, normalized[len(prefix):])
+                    if row:
+                        members = json.loads(row["members"])
+                        break
+            if members is None:
                 return
-            row = self.storage.get(event.sender_id, normalized[len(prefix):])
-            if not row:
-                return
-            members = json.loads(row["members"])
         lock = self.lock(("chat", event.chat_id))
         if lock.locked():
             return  # Do not queue multiple mass mentions in the same chat.

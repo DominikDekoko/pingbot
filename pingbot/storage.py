@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from uuid import uuid4
 
 
 def normalize(text: str) -> str:
@@ -23,18 +24,70 @@ class Storage:
                 owner INTEGER PRIMARY KEY, stage TEXT NOT NULL, name TEXT
             );
         """)
+        # One-time migration: preserve each existing user's phrase and lists.
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
+                self.db.execute("CREATE TABLE phrases (id TEXT PRIMARY KEY, owner INTEGER NOT NULL, "
+                                "text TEXT NOT NULL, text_key TEXT NOT NULL, UNIQUE(owner, text_key))")
+                self.db.execute("ALTER TABLE lists ADD COLUMN id TEXT")
+                for row in self.db.execute("SELECT owner, name_key FROM lists").fetchall():
+                    self.db.execute("UPDATE lists SET id=? WHERE owner=? AND name_key=?",
+                                    (uuid4().hex, row['owner'], row['name_key']))
+                self.db.execute("CREATE UNIQUE INDEX lists_id ON lists(id)")
+                for row in self.db.execute("SELECT id, phrase FROM users").fetchall():
+                    self.db.execute("INSERT INTO phrases VALUES (?, ?, ?, ?)",
+                                    (uuid4().hex, row['id'], row['phrase'], normalize(row['phrase'])))
+                self.db.execute("PRAGMA user_version=1")
 
     def register(self, owner):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO users(id) VALUES (?)", (owner,))
+            created = self.db.execute("INSERT OR IGNORE INTO users(id) VALUES (?)", (owner,)).rowcount
+            if created:
+                self.db.execute("INSERT INTO phrases VALUES (?, ?, ?, ?)",
+                                (uuid4().hex, owner, 'я иду домой', 'я иду домой'))
 
-    def phrase(self, owner):
-        row = self.db.execute("SELECT phrase FROM users WHERE id=?", (owner,)).fetchone()
-        return row[0] if row else None
+    def phrases(self, owner):
+        return self.db.execute("SELECT * FROM phrases WHERE owner=? ORDER BY text_key", (owner,)).fetchall()
 
-    def set_phrase(self, owner, phrase):
+    def save_phrase(self, owner, text, item_id=None):
         with self.db:
-            self.db.execute("UPDATE users SET phrase=? WHERE id=?", (phrase, owner))
+            if item_id:
+                changed = self.db.execute("UPDATE phrases SET text=?, text_key=? WHERE owner=? AND id=?",
+                                         (text, normalize(text), owner, item_id)).rowcount
+                if not changed:
+                    raise ValueError("Фраза уже удалена. Откройте меню заново.")
+            else:
+                item_id = uuid4().hex
+                self.db.execute("INSERT INTO phrases VALUES (?, ?, ?, ?)",
+                                (item_id, owner, text, normalize(text)))
+            self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
+        return item_id
+
+    def item(self, owner, kind, item_id):
+        table = {'list': 'lists', 'phrase': 'phrases'}[kind]
+        return self.db.execute(f"SELECT * FROM {table} WHERE owner=? AND id=?", (owner, item_id)).fetchone()
+
+    def delete_item(self, owner, kind, item_id):
+        table = {'list': 'lists', 'phrase': 'phrases'}[kind]
+        with self.db:
+            return self.db.execute(f"DELETE FROM {table} WHERE owner=? AND id=?", (owner, item_id)).rowcount > 0
+
+    def rename_list(self, owner, item_id, name):
+        with self.db:
+            changed = self.db.execute("UPDATE lists SET name=?, name_key=? WHERE owner=? AND id=?",
+                                     (name, normalize(name), owner, item_id)).rowcount
+            if not changed:
+                raise ValueError("Список уже удалён. Откройте меню заново.")
+            self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
+
+    def replace_members(self, owner, item_id, members):
+        with self.db:
+            changed = self.db.execute("UPDATE lists SET members=? WHERE owner=? AND id=?",
+                                     (json.dumps(members), owner, item_id)).rowcount
+            if not changed:
+                raise ValueError("Список уже удалён. Откройте меню заново.")
+            self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
 
     def lists(self, owner):
         return self.db.execute("SELECT * FROM lists WHERE owner=? ORDER BY name_key", (owner,)).fetchall()
@@ -45,9 +98,9 @@ class Storage:
 
     def save(self, owner, name, members):
         with self.db:
-            self.db.execute("INSERT INTO lists VALUES (?, ?, ?, ?) "
+            self.db.execute("INSERT INTO lists(owner, name, name_key, members, id) VALUES (?, ?, ?, ?, ?) "
                             "ON CONFLICT(owner, name_key) DO UPDATE SET name=excluded.name, members=excluded.members",
-                            (owner, name, normalize(name), json.dumps(members)))
+                            (owner, name, normalize(name), json.dumps(members), uuid4().hex))
             self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
 
     def delete(self, owner, name):
