@@ -1,13 +1,14 @@
 import json
 import sqlite3
 from uuid import uuid4
+from .event_store import EventStore
 
 
 def normalize(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-class Storage:
+class Storage(EventStore):
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
@@ -46,6 +47,7 @@ class Storage:
                     document BLOB NOT NULL, content BLOB NOT NULL
                 )""")
                 self.db.execute("PRAGMA user_version=2")
+            self.migrate_events()
 
     def sticker_rules(self):
         return self.db.execute("SELECT id, target_id, username, chance FROM sticker_rules ORDER BY username").fetchall()
@@ -61,6 +63,7 @@ class Storage:
         with self.db:
             self.db.execute("INSERT INTO sticker_rules VALUES (?, ?, ?, ?, ?, ?)",
                             (item_id, target_id, username, chance, document, content))
+            self._import_sticker_event(item_id)
             self.db.execute("DELETE FROM drafts WHERE owner=?", (owner,))
         return item_id
 
@@ -68,6 +71,7 @@ class Storage:
         with self.db:
             if chance is not None:
                 changed = self.db.execute("UPDATE sticker_rules SET chance=? WHERE id=?", (chance, item_id)).rowcount
+                self.db.execute('UPDATE automation_events SET chance=? WHERE id=?', (chance, item_id))
             else:
                 changed = self.db.execute("UPDATE sticker_rules SET document=?, content=? WHERE id=?",
                                          (document, content, item_id)).rowcount
@@ -78,6 +82,13 @@ class Storage:
     def delete_sticker_rule(self, item_id):
         with self.db:
             self.db.execute("DELETE FROM sticker_rules WHERE id=?", (item_id,))
+            self.db.execute('UPDATE automation_events SET enabled=0 WHERE id=?', (item_id,))
+            for action in self.blocks('action'):
+                if action['kind'] == 'legacy_sticker' and json.loads(action['data'])['rule_id'] == item_id:
+                    self.db.execute('UPDATE automation_events SET enabled=0 WHERE id IN '
+                                    '(SELECT event_id FROM automation_links WHERE block_id=?)', (action['id'],))
+                    self.db.execute('DELETE FROM automation_links WHERE block_id=?', (action['id'],))
+                    self.db.execute('DELETE FROM automation_blocks WHERE id=?', (action['id'],))
 
     def refresh_sticker_document(self, item_id, previous, refreshed):
         with self.db:

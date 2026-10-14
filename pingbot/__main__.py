@@ -2,7 +2,7 @@ import asyncio
 import logging
 import signal
 
-from telethon import TelegramClient, connection, events
+from telethon import TelegramClient, connection, events, types
 
 from .bot import Bot
 from .config import Config
@@ -28,6 +28,8 @@ async def main():
         bot = Bot(client, storage, config, me.username)
         client.add_event_handler(bot.handle, events.NewMessage(incoming=True))
         client.add_event_handler(bot.handle, events.CallbackQuery())
+        client.add_event_handler(bot.automation.membership, events.ChatAction())
+        client.add_event_handler(bot.automation.participant_update, events.Raw(types=types.UpdateChannelParticipant))
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(client.disconnect()))

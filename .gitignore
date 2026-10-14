@@ -5,3 +5,4 @@ __pycache__/
 data/
 *.session*
 *.sqlite3*
+task.md

@@ -11,17 +11,20 @@ from .mentions import ALL_PATTERN, user_batches, username_batches
 from .menus import PrivateMenu
 from .storage import normalize
 from .stickers import StickerAdmin
+from .automation import Automation, Trigger
+from .event_menus import EventMenus
 
 LOG = logging.getLogger(__name__)
 
 
-class Bot(StickerAdmin, PrivateMenu):
+class Bot(EventMenus, StickerAdmin, PrivateMenu):
     def __init__(self, client, storage, config, username):
         self.client, self.storage, self.config = client, storage, config
         self.username = username.lower()
         self.locks = WeakValueDictionary()
         self.last_ping = {}
         self.blocked_until = 0.0
+        self.automation = Automation(self)
 
     def lock(self, key):
         lock = self.locks.get(key)
@@ -57,7 +60,11 @@ class Bot(StickerAdmin, PrivateMenu):
             elif event.is_group:
                 if getattr(getattr(event, 'message', None), 'action', None):
                     return
-                await self.auto_sticker(event)
+                if hasattr(event, 'get_chat'):
+                    chat = await event.get_chat()
+                    self.storage.remember_chat(event.chat_id, getattr(chat, 'title', str(event.chat_id)))
+                await self.automation.process(Trigger('message', event.chat_id, sender, event.id,
+                                                     event.raw_text, await event.get_input_chat()))
                 if event.raw_text and time.monotonic() >= self.blocked_until:
                     await self.group(event)
         except errors.FloodWaitError as exc:

@@ -66,12 +66,16 @@ class StickerAdmin:
         if row is None:
             await self.reply(event, "Правило уже удалено.", CANCEL)
             return
+        migrated = self.storage.event_rule(item_id)
+        status = 'включено' if migrated and migrated['enabled'] else 'выключено'
         await self.reply(event, f"Пользователь: @{row['username']}\nTelegram ID: {row['target_id']}\n"
                          f"Вероятность: {row['chance']:g}%\n"
+                         f"Событие: {status}\n"
                          "Ответ на каждое новое сообщение во всех группах с ботом. 0% отключает ответы.", [
                              [button("Показать стикер", f"sticker:preview:{item_id}")],
                              [button("Изменить стикер", f"sticker:edit:{item_id}")],
                              [button("Изменить вероятность", f"sticker:chance:{item_id}")],
+                             [button("Настроить событие", f"ev:view:e:{item_id}")],
                              [button("Удалить", f"sticker:askdelete:{item_id}")],
                              [button("Назад", "sticker:page:0")]])
 
